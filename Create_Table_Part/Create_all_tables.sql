@@ -97,7 +97,42 @@ BEGIN
     -- --------------------------------------------------------
     -- TABLE 5 : MachineRegisterHistory
     -- --------------------------------------------------------
-    -- ← coller ici les colonnes une fois que tu me les donnes
+    
+      IF OBJECT_ID('dbo.MachineRegisterHistory', 'U') IS NOT NULL AND @DropIfExists = 1
+    BEGIN
+        DROP TABLE [dbo].[MachineRegisterHistory];
+        PRINT '[DROP] Table MachineRegisterHistory supprimée.';
+    END
+
+    IF OBJECT_ID('dbo.MachineRegisterHistory', 'U') IS NULL
+    BEGIN
+        CREATE TABLE [dbo].[MachineRegisterHistory] (
+            MachineRegisterHistoryId  BIGINT       NOT NULL,
+            MachineRegisterId         INT          NOT NULL,
+            MachineId                 INT          NOT NULL,
+            MachineEventHistoryId     BIGINT       NOT NULL,
+            NodeIndex                 SMALLINT     NOT NULL,
+            ArraySize                 SMALLINT     NOT NULL,
+            Value                     SQL_VARIANT  NULL,
+            UtcTime                   DATETIME     NOT NULL,
+            Quality                   TINYINT      NOT NULL,
+            Invalid                   BIT          NOT NULL,
+
+            -- Clé de partition → début de semaine Mercredi → fin Mardi
+            -- calculée automatiquement depuis UtcTime
+            PartitionWeek AS CAST(
+                DATEADD(DAY,
+                    -((DATEPART(WEEKDAY, UtcTime) + 4) % 7),
+                    CAST(UtcTime AS DATE)
+                ) AS DATE
+            ) PERSISTED
+
+        ) ON ps_Weekly(PartitionWeek);
+         PRINT '[OK] Table MachineRegisterHistory créée.';
+    END
+    ELSE
+        PRINT '[SKIP] Table MachineRegisterHistory existe déjà.';
+
 
     PRINT '===== FIN CRÉATION =====';
 END;
