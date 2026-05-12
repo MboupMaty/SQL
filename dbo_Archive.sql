@@ -1,118 +1,157 @@
-USE [Certiq]    -- ← tables source ici
+USE [Certiq]
 GO
 
-IF OBJECT_ID('dbo.usp_Archive_Switch', 'P') IS NOT NULL
-    DROP PROCEDURE dbo.usp_Archive_Switch;
-GO
-
-CREATE PROCEDURE dbo.usp_Archive_Switch
-    @ArchiveAfterDays INT = 90    -- ← 3 mois par défaut
+ALTER PROCEDURE dbo.usp_Archive
+    @TableName         SYSNAME,
+    @ArchiveTable      SYSNAME,
+    @PartitionFunction SYSNAME,
+    @PartitionScheme   SYSNAME,
+    @PartitionColumn   SYSNAME,
+    @KeepPartitions    INT = 8
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    DECLARE @DateCoupure  DATE = DATEADD(DAY, -@ArchiveAfterDays, CAST(GETDATE() AS DATE));
-    DECLARE @PartitionNum INT;
-    DECLARE @SQL          NVARCHAR(MAX);
+    DECLARE @ObjectID       INT = OBJECT_ID(@TableName);
+    DECLARE @PartitionCount INT;
 
-    -- Trouver le numéro de partition à archiver
-    SELECT @PartitionNum = $PARTITION.pf_Weekly(@DateCoupure);  -- ← bon nom
+    -- Vérifier le nombre total de partitions
+    SELECT @PartitionCount = COUNT(*)
+    FROM sys.partitions
+    WHERE object_id = @ObjectID
+      AND index_id IN (0, 1);
 
-    PRINT '===== ARCHIVAGE PAR SWITCH =====';
-    PRINT 'Date coupure    : ' + CAST(@DateCoupure  AS NVARCHAR(20));
-    PRINT 'Numéro partition: ' + CAST(@PartitionNum AS NVARCHAR(10));
-
-    -- ⚠️ Vérification — si partition = 0 ou NULL → rien à archiver
-    IF @PartitionNum IS NULL OR @PartitionNum = 0
+    IF @PartitionCount <= @KeepPartitions
     BEGIN
-        PRINT '[SKIP] Aucune partition à archiver.';
+        PRINT 'Aucune partition à archiver.';
         RETURN;
-    END
+    END;
 
-    -- --------------------------------------------------------
-    -- SWITCH Machine → Certiq_Archive.dbo.Machine_Archive
-    -- --------------------------------------------------------
-    BEGIN TRY
-        SET @SQL = N'
-        ALTER TABLE [Certiq].[dbo].[Machine]
-            SWITCH PARTITION ' + CAST(@PartitionNum AS NVARCHAR(10)) + N'
-            TO [Certiq_Archive].[dbo].[Machine_Archive];
-        ';
-        EXEC sp_executesql @SQL;
-        PRINT '[OK] Machine — partition ' + CAST(@PartitionNum AS NVARCHAR(10)) + ' archivée.';
-    END TRY
-    BEGIN CATCH
-        PRINT '[ERREUR] Machine — ' + ERROR_MESSAGE();
-    END CATCH
+    DECLARE @PartitionsToMove INT = @PartitionCount - @KeepPartitions;
+    PRINT CONCAT('Nombre de partitions à déplacer : ', @PartitionsToMove);
 
-    -- --------------------------------------------------------
-    -- SWITCH MachineEventHistory → Certiq_Archive
-    -- --------------------------------------------------------
-    BEGIN TRY
-        SET @SQL = N'
-        ALTER TABLE [Certiq].[dbo].[MachineEventHistory]
-            SWITCH PARTITION ' + CAST(@PartitionNum AS NVARCHAR(10)) + N'
-            TO [Certiq_Archive].[dbo].[MachineEventHistory_Archive];
-        ';
-        EXEC sp_executesql @SQL;
-        PRINT '[OK] MachineEventHistory — partition ' + CAST(@PartitionNum AS NVARCHAR(10)) + ' archivée.';
-    END TRY
-    BEGIN CATCH
-        PRINT '[ERREUR] MachineEventHistory — ' + ERROR_MESSAGE();
-    END CATCH
+    -- Identifier les partitions les plus vieilles
+    DECLARE @Partitions TABLE (
+        partition_number INT PRIMARY KEY,
+        BoundaryValue    SQL_VARIANT
+    );
 
-    -- --------------------------------------------------------
-    -- SWITCH MachineRegisterHistory → Certiq_Archive
-    -- --------------------------------------------------------
-    BEGIN TRY
-        SET @SQL = N'
-        ALTER TABLE [Certiq].[dbo].[MachineRegisterHistory]
-            SWITCH PARTITION ' + CAST(@PartitionNum AS NVARCHAR(10)) + N'
-            TO [Certiq_Archive].[dbo].[MachineRegisterHistory_Archive];
-        ';
-        EXEC sp_executesql @SQL;
-        PRINT '[OK] MachineRegisterHistory — partition ' + CAST(@PartitionNum AS NVARCHAR(10)) + ' archivée.';
-    END TRY
-    BEGIN CATCH
-        PRINT '[ERREUR] MachineRegisterHistory — ' + ERROR_MESSAGE();
-    END CATCH
+    INSERT INTO @Partitions (partition_number, BoundaryValue)
+    SELECT TOP (@PartitionsToMove)
+        p.partition_number,
+        prv.value
+    FROM sys.partitions p
+    JOIN sys.indexes i
+        ON p.object_id = i.object_id AND p.index_id = i.index_id
+    JOIN sys.partition_schemes ps
+        ON i.data_space_id = ps.data_space_id
+    JOIN sys.partition_functions pf
+        ON ps.function_id = pf.function_id
+    LEFT JOIN sys.partition_range_values prv
+        ON pf.function_id = prv.function_id
+        AND prv.boundary_id = p.partition_number - 1
+    WHERE p.object_id = @ObjectID
+    ORDER BY prv.value;
 
-    -- --------------------------------------------------------
-    -- SWITCH MachineEventDefinition → Certiq_Archive
-    -- --------------------------------------------------------
-    BEGIN TRY
-        SET @SQL = N'
-        ALTER TABLE [Certiq].[dbo].[MachineEventDefinition]
-            SWITCH PARTITION ' + CAST(@PartitionNum AS NVARCHAR(10)) + N'
-            TO [Certiq_Archive].[dbo].[MachineEventDefinition_Archive];
-        ';
-        EXEC sp_executesql @SQL;
-        PRINT '[OK] MachineEventDefinition — partition ' + CAST(@PartitionNum AS NVARCHAR(10)) + ' archivée.';
-    END TRY
-    BEGIN CATCH
-        PRINT '[ERREUR] MachineEventDefinition — ' + ERROR_MESSAGE();
-    END CATCH
+    -- Boucle sur les partitions à archiver
+    DECLARE @Partition INT;
 
-    -- --------------------------------------------------------
-    -- SWITCH MachineRegisterDefinition → Certiq_Archive
-    -- --------------------------------------------------------
-    BEGIN TRY
-        SET @SQL = N'
-        ALTER TABLE [Certiq].[dbo].[MachineRegisterDefinition]
-            SWITCH PARTITION ' + CAST(@PartitionNum AS NVARCHAR(10)) + N'
-            TO [Certiq_Archive].[dbo].[MachineRegisterDefinition_Archive];
-        ';
-        EXEC sp_executesql @SQL;
-        PRINT '[OK] MachineRegisterDefinition — partition ' + CAST(@PartitionNum AS NVARCHAR(10)) + ' archivée.';
-    END TRY
-    BEGIN CATCH
-        PRINT '[ERREUR] MachineRegisterDefinition — ' + ERROR_MESSAGE();
-    END CATCH
+    DECLARE part_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT partition_number FROM @Partitions ORDER BY partition_number;
 
-    PRINT '===== FIN ARCHIVAGE =====';
+    OPEN part_cursor;
+    FETCH NEXT FROM part_cursor INTO @Partition;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        PRINT '---------------------------------------------';
+        PRINT CONCAT('Traitement de la partition ', @Partition);
+
+        BEGIN TRY
+
+            -- ------------------------------------------------
+            -- Copier vers la table archive + ajouter ArchivedAt
+            -- ------------------------------------------------
+            DECLARE @RowsCopied  INT;
+            DECLARE @sqlInsert   NVARCHAR(MAX);
+
+            SET @sqlInsert = N'
+                INSERT INTO ' + @ArchiveTable + N'
+                SELECT
+                    src.*,
+                    GETDATE() AS ArchivedAt    -- ← colonne archive uniquement
+                FROM ' + @TableName + N' src
+                WHERE $PARTITION.' + @PartitionFunction + N'(' + QUOTENAME(@PartitionColumn) + N') = '
+                + CAST(@Partition AS VARCHAR(10)) + N';
+            ';
+
+            EXEC sys.sp_executesql @sqlInsert;
+            SET @RowsCopied = @@ROWCOUNT;
+            PRINT CONCAT('Lignes copiées : ', @RowsCopied);
+
+            IF @RowsCopied = 0
+            BEGIN
+                PRINT CONCAT('Partition ', @Partition, ' vide — ignorée.');
+                FETCH NEXT FROM part_cursor INTO @Partition;
+                CONTINUE;
+            END;
+
+            -- ------------------------------------------------
+            -- Vider la partition source après copie
+            -- ------------------------------------------------
+            PRINT 'Truncate de la partition...';
+
+            DECLARE @sqlTruncate NVARCHAR(MAX) = N'
+                TRUNCATE TABLE ' + @TableName + N'
+                WITH (PARTITIONS (' + CAST(@Partition AS VARCHAR(10)) + N'));
+            ';
+
+            EXEC sys.sp_executesql @sqlTruncate;
+            PRINT CONCAT('Partition ', @Partition, ' vidée avec succès.');
+
+        END TRY
+        BEGIN CATCH
+            PRINT 'Erreur détectée, arrêt du traitement.';
+            PRINT ERROR_MESSAGE();
+            CLOSE part_cursor;
+            DEALLOCATE part_cursor;
+            RETURN;
+        END CATCH;
+
+        FETCH NEXT FROM part_cursor INTO @Partition;
+    END;
+
+    CLOSE part_cursor;
+    DEALLOCATE part_cursor;
+
+    PRINT '===== Archivage terminé =====';
 END;
 GO
 
--- Exécution
-EXEC dbo.usp_Archive_Switch;                        -- 90 jours par défaut (3 mois)
-EXEC dbo.usp_Archive_Switch @ArchiveAfterDays = 90; -- explicite
+-- Exécution pour chaque table
+EXEC dbo.usp_Archive
+    @TableName         = '[Certiq].[dbo].[Machine]',
+    @ArchiveTable      = '[Certiq_Archive].[dbo].[Machine_Archive]',
+    @PartitionFunction = 'pf_Weekly',
+    @PartitionScheme   = 'ps_Weekly',
+    @PartitionColumn   = 'PartitionWeek',
+    @KeepPartitions    = 13;   -- ← garder 13 semaines = ~3 mois
+GO
+
+EXEC dbo.usp_Archive
+    @TableName         = '[Certiq].[dbo].[MachineEventHistory]',
+    @ArchiveTable      = '[Certiq_Archive].[dbo].[MachineEventHistory_Archive]',
+    @PartitionFunction = 'pf_Weekly',
+    @PartitionScheme   = 'ps_Weekly',
+    @PartitionColumn   = 'PartitionWeek',
+    @KeepPartitions    = 13;
+GO
+
+EXEC dbo.usp_Archive
+    @TableName         = '[Certiq].[dbo].[MachineRegisterHistory]',
+    @ArchiveTable      = '[Certiq_Archive].[dbo].[MachineRegisterHistory_Archive]',
+    @PartitionFunction = 'pf_Weekly',
+    @PartitionScheme   = 'ps_Weekly',
+    @PartitionColumn   = 'PartitionWeek',
+    @KeepPartitions    = 13;
+GO
